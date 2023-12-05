@@ -8,6 +8,7 @@
 #define C 90
 #define S 99
 #define BSIZE 108
+#define ITERATIONS 20
 typedef unsigned int Uint;
 #define SET_BIT(a, b) a &= ~((Uint)1 << b);
 
@@ -18,10 +19,21 @@ void initializeRows(Uint* board);
 void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
 
-__global__ void addKernel(int *c, const int *a, const int *b)
+__device__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *lastBoard)
 {
-    int i = threadIdx.x;
-    c[i] = a[i] + b[i];
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    while(idx < boardsCount)
+    {
+        int boardBegin = idx * BSIZE;
+        int i = boardBegin; 
+        while(i < boardBegin + N * N)
+        {
+            if(oldBoard[i])
+                break;
+            i++;
+        }
+    }
 }
 
 int main()
@@ -44,6 +56,9 @@ int main()
 Uint* solveSudoku(Uint *inBoard)
 {
     Uint* board = initializeBoard(inBoard);
+
+    const int boardMem = pow(2, 26);
+
     return board;
 }
 
@@ -107,7 +122,6 @@ void initializeColumns(Uint* board)
         {
             if (board[i * N + c] > 0)
                 SET_BIT(board[C + c], board[i * N + c] - 1);
-                //board[C + c] = board[C + c] | ((Uint)1 << board[i * N + c]);
         }
     }
 }
@@ -123,7 +137,8 @@ void initializeSubboards(Uint* board)
             int r = i / 3;
             int c = i % 3;
             if (board[start + r * N + c] > 0)
-                board[S + s] = board[S + s] | ((Uint)1 << board[start + r * N + c]);
+                SET_BIT(board[S + s], board[start + r * N + c] - 1);
+                // board[S + s] = board[S + s] | ((Uint)1 << board[start + r * N + c]);
         }
     }
 }
