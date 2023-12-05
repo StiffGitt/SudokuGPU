@@ -9,12 +9,14 @@
 #define S 99
 #define BSIZE 108
 #define ITERATIONS 20
+#define BLOCKS 256
+#define THREADS 512
 typedef unsigned int Uint;
-#define SET_BIT(a, b) a &= ~((Uint)1 << b);
-#define CHECK_BIT(a, b) (bool)((a >> n) & (Uint)1);
+#define CLEAR_BIT(a, b) a &= ~((Uint)1 << b);
+#define CHECK_BIT(a, b) (bool)((a >> b) & (Uint)1)
 #define GET_ROW(i) (int)(R + i / N);
-#define GET_COLUMNS(i) (int)(C + i % N);
-#define E
+#define GET_COLUMN(i) (int)(C + i % N);
+#define GET_SUBBOARD(i) (int)(S + ((i / N) / 3) * 3 + ((i % N) / 3));
 
 Uint* solveSudoku(Uint* board);
 void printBoard(Uint* board);
@@ -33,20 +35,34 @@ __global__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *la
         int i = boardBegin; 
         while(i < boardBegin + N * N)
         {
-            if(oldBoard[i] > 0)
+            if(oldBoard[i] == 0)
                 break;
             i++;
         }
-        if(i == boardBegin + N * N)
-            continue;
+        if (i == boardBegin + N * N)
+            return;
 
-        int r = R + 
+        int r = boardBegin + GET_ROW(i - boardBegin);
+        int c = boardBegin + GET_COLUMN(i - boardBegin);
+        int s = boardBegin + GET_SUBBOARD(i - boardBegin);
         for (int number = 1; number <= N; number++)
         {
-            if(CHECK_BIT())
+            if (CHECK_BIT(oldBoard[r], number - 1) && CHECK_BIT(oldBoard[c], number - 1) && CHECK_BIT(oldBoard[s], number - 1))
+            {
+                int curBoard = atomicAdd(lastBoard, 1);
+                int newBegin = curBoard * BSIZE;
+                for (int j = 0; j < BSIZE; j++)
+                {
+                    newBoard[newBegin + j] = oldBoard[boardBegin + j];
+                }
+                newBoard[newBegin + i - boardBegin] = number;
+                CLEAR_BIT(newBoard[newBegin + r - boardBegin], number - 1);
+                CLEAR_BIT(newBoard[newBegin + c - boardBegin], number - 1);
+                CLEAR_BIT(newBoard[newBegin + s - boardBegin], number - 1);
+            }
         }
+        idx += blockDim.x * gridDim.x;
     }
-
 }
 
 int main()
@@ -69,18 +85,58 @@ int main()
 Uint* solveSudoku(Uint *inBoard)
 {
     Uint* board = initializeBoard(inBoard);
+    printBoard(board);
 
     const int boardMem = pow(2, 26);
+    Uint* board1, *board2;
+    int* lastBoard;
 
+    cudaMalloc(&board1, boardMem * sizeof(Uint));
+    cudaMalloc(&board2, boardMem * sizeof(Uint));
+    cudaMalloc(&lastBoard, sizeof(int));
+
+    cudaMemset(board1, 0, boardMem * sizeof(Uint));
+    cudaMemset(board2, 0, boardMem * sizeof(Uint));
+    cudaMemset(lastBoard, 0, sizeof(int));
+
+    cudaMemcpy(board1, board, BSIZE * sizeof(Uint), cudaMemcpyHostToDevice);
+    int boardsCount = 1;
+    
+    for (int it = 0; it < ITERATIONS; it++)
+    {
+        //sie pierdoli
+        if(it % 2 == 0)
+            cudaBFS<<< BLOCKS, THREADS >>>(board1, board2, boardsCount, lastBoard);
+        else
+            cudaBFS <<<BLOCKS, THREADS >>> (board2, board1, boardsCount, lastBoard);
+
+        cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
+
+        printf("total boards after an iteration %d: %d\n", it, boardsCount);
+
+        cudaMemset(lastBoard, 0, sizeof(int));
+    }
+
+    cudaMemcpy(board, board1, BSIZE * sizeof(Uint), cudaMemcpyDeviceToHost);
+    printBoard(board);
+
+    cudaFree(board1);
+    cudaFree(board2);
+    cudaFree(lastBoard);
     return board;
 }
 
 void printBoard(Uint* board)
 {
+    std::cout << "\n\n";
     for (int i = 0; i < N; i++)
     {
+        if (i == 3 || i == 6)
+            std::cout << "-------------------\n";
         for (int j = 0; j < N; j++)
         {
+            if (j == 3 || j == 6)
+                std::cout << "|";
             std::cout << board[i * N + j] << " ";
         }
         std::cout << "\n";
@@ -104,13 +160,12 @@ void printBoard(Uint* board)
 
 Uint* initializeBoard(Uint* inBoard)
 {
-    Uint board[BSIZE] = {0};
-    std::copy(inBoard, inBoard + N * N, std::begin(board));
+    Uint *board = (Uint*)malloc(BSIZE * sizeof(Uint));
+    std::copy(inBoard, inBoard + N * N, board);
     initializeRows(board);
     initializeColumns(board);
     initializeSubboards(board);
-    printBoard(board);
-    
+
     return board;
 }
 void initializeRows(Uint* board)
@@ -121,7 +176,7 @@ void initializeRows(Uint* board)
         for (int i = 0; i < N; i++)
         {
             if (board[r * N + i] > 0)
-                SET_BIT(board[R + r], board[r * N + i] - 1);
+                CLEAR_BIT(board[R + r], board[r * N + i] - 1);
         }
     }
 }
@@ -134,7 +189,7 @@ void initializeColumns(Uint* board)
         for (int i = 0; i < N; i++)
         {
             if (board[i * N + c] > 0)
-                SET_BIT(board[C + c], board[i * N + c] - 1);
+                CLEAR_BIT(board[C + c], board[i * N + c] - 1);
         }
     }
 }
@@ -143,15 +198,14 @@ void initializeSubboards(Uint* board)
 {
     for (int s = 0; s < N; s++)
     {
-        board[S + s] = (Uint)pow(2, N - 1);
-        int start = ((s / 3) * 3) * 3 * N + ((s % 3) * 3) * 3;
+        board[S + s] = (Uint)pow(2, N) - 1;
+        int start = ((s / 3) * 3) * N + ((s % 3) * 3);
         for (int i = 0; i < N; i++)
         {
             int r = i / 3;
             int c = i % 3;
             if (board[start + r * N + c] > 0)
-                SET_BIT(board[S + s], board[start + r * N + c] - 1);
-                // board[S + s] = board[S + s] | ((Uint)1 << board[start + r * N + c]);
+                CLEAR_BIT(board[S + s], board[start + r * N + c] - 1);
         }
     }
 }
