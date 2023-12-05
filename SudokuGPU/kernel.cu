@@ -11,6 +11,10 @@
 #define ITERATIONS 20
 typedef unsigned int Uint;
 #define SET_BIT(a, b) a &= ~((Uint)1 << b);
+#define CHECK_BIT(a, b) (bool)((a >> n) & (Uint)1);
+#define GET_ROW(i) (int)(R + i / N);
+#define GET_COLUMNS(i) (int)(C + i % N);
+#define E
 
 Uint* solveSudoku(Uint* board);
 void printBoard(Uint* board);
@@ -19,7 +23,7 @@ void initializeRows(Uint* board);
 void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
 
-__device__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *lastBoard)
+__global__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *lastBoard)
 {
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -29,11 +33,20 @@ __device__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *la
         int i = boardBegin; 
         while(i < boardBegin + N * N)
         {
-            if(oldBoard[i])
+            if(oldBoard[i] > 0)
                 break;
             i++;
         }
+        if(i == boardBegin + N * N)
+            continue;
+
+        int r = R + 
+        for (int number = 1; number <= N; number++)
+        {
+            if(CHECK_BIT())
+        }
     }
+
 }
 
 int main()
