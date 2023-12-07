@@ -2,6 +2,10 @@
 #include "device_launch_parameters.h"
 #include <stdio.h>
 #include <iostream>
+#include <chrono>
+#include <iomanip>
+
+using namespace std::chrono;
 
 #define BOARD_FILE "board.txt"
 #define N 9
@@ -29,164 +33,68 @@ void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
 Uint* loadBoard();
 bool checkSolution(Uint* solution, Uint* board);
-
-__global__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *lastBoard, int* empties, int isFinal)
-{
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-
-    while(idx < boardsCount)
-    {
-        int boardBegin = idx * BSIZE;
-        int i = boardBegin; 
-        while(i < boardBegin + N * N)
-        {
-            if(oldBoard[i] == 0)
-                break;
-            i++;
-        }
-        if (i == boardBegin + N * N)
-            return;
-
-        int r = boardBegin + GET_ROW((i - boardBegin));
-        int c = boardBegin + GET_COLUMN((i - boardBegin));
-        int s = boardBegin + GET_SUBBOARD((i - boardBegin));
-        for (int number = 1; number <= N; number++)
-        {
-            if (CHECK_BIT(oldBoard[r], (number - 1)) && CHECK_BIT(oldBoard[c], (number - 1)) && CHECK_BIT(oldBoard[s], (number - 1)))
-            {
-                int curBoard = atomicAdd(lastBoard, 1);
-                int newBegin = curBoard * BSIZE;
-                int emptiesIdx = curBoard * N * N;
-                for (int j = 0; j < BSIZE; j++)
-                {
-                    newBoard[newBegin + j] = oldBoard[boardBegin + j];
-                    if (isFinal == 1 && j < N * N && oldBoard[boardBegin + j] == 0 && boardBegin + j != i)
-                    {
-                        empties[emptiesIdx] = j;
-                        emptiesIdx++;
-                    }
-                }
-                newBoard[newBegin + i - boardBegin] = number;
-                CLEAR_BIT(newBoard[newBegin + r - boardBegin], (number - 1));
-                CLEAR_BIT(newBoard[newBegin + c - boardBegin], (number - 1));
-                CLEAR_BIT(newBoard[newBegin + s - boardBegin], (number - 1));
-            }
-        }
-        idx += blockDim.x * gridDim.x;
-    }
-}
-
-__global__ void cudaDFS(Uint* board, int boardsCount, int* empties, int* outStatus, Uint* solution)
-{
-    int idx = blockDim.x * blockIdx.x + threadIdx.x;
-
-    while ((*outStatus) == 0 && idx < boardsCount)
-    {
-        int boardBegin = idx * BSIZE;
-        int emptiesBegin = idx * N * N;
-        int emptiesIdx = emptiesBegin;
-
-        while (empties[emptiesIdx] >= 0)
-        {
-            int boardIdx = boardBegin + empties[emptiesIdx];
-            int r = boardBegin + GET_ROW((empties[emptiesIdx]));
-            int c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
-            int s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
-
-            board[boardIdx]++;
-            Uint number = board[boardIdx];
-            if (CHECK_BIT(board[r], (number - 1)) && CHECK_BIT(board[c], (number - 1)) && CHECK_BIT(board[s], (number - 1)))
-            {
-                CLEAR_BIT(board[r], (number - 1));
-                CLEAR_BIT(board[c], (number - 1));
-                CLEAR_BIT(board[s], (number - 1));
-                emptiesIdx++;
-            }
-            else
-            {
-                if (board[boardIdx] >= 9)
-                {
-                    board[boardIdx] = 0;
-                    emptiesIdx--;
-                    if (emptiesIdx < emptiesBegin)
-                        break;
-                    boardIdx = boardBegin + empties[emptiesIdx];
-                    r = boardBegin + GET_ROW((empties[emptiesIdx]));
-                    c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
-                    s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
-                    number = board[boardIdx];
-
-                    SET_BIT(board[r], (number - 1));
-                    SET_BIT(board[c], (number - 1));
-                    SET_BIT(board[s], (number - 1));
-
-                    if (r == 81)
-                    {
-                        board[boardBegin + BSIZE - 1] = emptiesIdx;
-                    }
-                }
-            }
-        }
-
-        if (empties[emptiesIdx] < 0 && emptiesIdx > emptiesBegin)
-        {
-            *outStatus = 1;
-            for (int i = 0; i < N * N; i++)
-            {
-                solution[i] = board[boardBegin + i];
-            }
-        }
-
-        idx += blockDim.x * gridDim.x;
-    }
-}
+__global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* lastBoard, int* empties, int isFinal);
+__global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outStatus, Uint* solution);
 
 int main()
 {
-    /*Uint board[]{
-        0, 4, 0, 0, 0, 0, 1, 7, 9,
-        0, 0, 2, 0, 0, 8, 0, 5, 4,
-        0, 0, 6, 0, 0, 5, 0, 0, 8,
-        0, 8, 0, 0, 7, 0, 9, 1, 0,
-        0, 5, 0, 0, 9, 0, 0, 3, 0,
-        0, 1, 9, 0, 6, 0, 0, 4, 0,
-        3, 0, 0, 4, 0, 0, 7, 0, 0,
-        5, 7, 0, 1, 0, 0, 2, 0, 0,
-        9, 2, 8, 0, 0, 0, 0, 6, 0 };*/
     Uint* board = loadBoard();
+
+    std::cout << "Input:";
+
+    printBoard(board, false);
+
+    auto clockStart = high_resolution_clock::now();
+
     Uint* solution = solveSudoku(board);
+
+    auto clockStop = high_resolution_clock::now();
+    std::cout << "\nFull Time:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
+
+    std::cout << "\nSolution: ";
+
+    printBoard(solution, false);
+
     if (checkSolution(solution, board))
-        std::cout << "\n\CORRECT SOLUTION!!";
+        std::cout << "\nCORRECT SOLUTION!!";
     else
-        std::cout << "\n\INCORRECT SOLUTION!!";
+        std::cout << "\nINCORRECT SOLUTION!!";
+
     return 0;
 }
 
 Uint* solveSudoku(Uint *inBoard)
 {
+    std::chrono::steady_clock::time_point clockStart, clockStop;
+
+    clockStart = high_resolution_clock::now();
     Uint* board = initializeBoard(inBoard);
-    printBoard(board, true);
 
     const int boardMem = pow(2, MEMSIZE);
-    Uint* board1, *board2;
-    int* lastBoard, *empties, *emptiesCount;
+    Uint* board1, *board2, *solution;
+    int* lastBoard, *empties, *emptiesCount, *outStatus;
 
     cudaMalloc(&board1, boardMem * sizeof(Uint));
     cudaMalloc(&board2, boardMem * sizeof(Uint));
     cudaMalloc(&empties, boardMem * sizeof(Uint));
-    cudaMalloc(&emptiesCount, (boardMem / BSIZE) * sizeof(Uint));
     cudaMalloc(&lastBoard, sizeof(int));
+    cudaMalloc(&outStatus, sizeof(int));
+    cudaMalloc(&solution, N * N * sizeof(Uint));
 
     cudaMemset(board1, 0, boardMem * sizeof(Uint));
     cudaMemset(board2, 0, boardMem * sizeof(Uint));
     cudaMemset(empties, -1, boardMem * sizeof(Uint));
-    //cudaMemset(emptiesCount, 0, (boardMem / BSIZE) * sizeof(Uint));
+    cudaMemset(outStatus, 0, sizeof(int));
+    cudaMemset(solution, 0, N * N * sizeof(Uint));
 
     cudaMemcpy(board1, board, BSIZE * sizeof(Uint), cudaMemcpyHostToDevice);
     int boardsCount = 1;
     int isFinal = 0;
     int itDone = 0;
-    
+
+    clockStop = high_resolution_clock::now();
+    std::cout << "\nMemory allocation:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n\n";
+    clockStart = high_resolution_clock::now();
     for (int it = 0; it < ITERATIONS; it++)
     {
         cudaMemset(lastBoard, 0, sizeof(int));
@@ -195,9 +103,9 @@ Uint* solveSudoku(Uint *inBoard)
             isFinal = 1;
 
         if(it % 2 == 0)
-            cudaBFS<<< BLOCKS, THREADS >>>(board1, board2, boardsCount, lastBoard, empties, isFinal);
+            cudaDoBFS<<< BLOCKS, THREADS >>>(board1, board2, boardsCount, lastBoard, empties, isFinal);
         else
-            cudaBFS<<< BLOCKS, THREADS >>>(board2, board1, boardsCount, lastBoard, empties, isFinal);
+            cudaDoBFS<<< BLOCKS, THREADS >>>(board2, board1, boardsCount, lastBoard, empties, isFinal);
 
         cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
         
@@ -205,34 +113,34 @@ Uint* solveSudoku(Uint *inBoard)
 
          if (boardsCount > (boardMem / BSIZE))
          {
-             std::cout << "\n memory overflow, bfs needs more memory, bfs rollback... \n";
-             break;
+             std::cout << "\n memory overflow, bfs needs more memory, exiting... \n";
+             return inBoard;
          }
          itDone = it + 1;
     }
 
     Uint* bfsBoard = (itDone % 2 == 0)? board1 : board2;
 
-    cudaMemcpy(board, bfsBoard, BSIZE * sizeof(Uint), cudaMemcpyDeviceToHost);
-    printBoard(board, true);
+    cudaDeviceSynchronize();
+    clockStop = high_resolution_clock::now();
+    std::cout << "\nBFS:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
+
+    /*cudaMemcpy(board, bfsBoard, BSIZE * sizeof(Uint), cudaMemcpyDeviceToHost);
+    printBoard(board, true);*/
 
     /*int tab[N * N];
     cudaMemcpy(tab, empties, N * N * sizeof(int), cudaMemcpyDeviceToHost);
     printBoard(tab, false);*/
 
-    int *outStatus;
-    Uint* solution;
+    clockStart = high_resolution_clock::now();
 
-    cudaMalloc(&outStatus, sizeof(int));
-    cudaMalloc(&solution, N * N * sizeof(Uint));
-    
-    cudaMemset(outStatus, 0, sizeof(int));
-    cudaMemset(solution, 0, N * N * sizeof(Uint));
+    cudaDoDFS<<< BLOCKS, THREADS >>>(bfsBoard, boardsCount, empties, outStatus, solution);
 
-    cudaDFS<<< BLOCKS, THREADS >>>(bfsBoard, boardsCount, empties, outStatus, solution);
+    cudaDeviceSynchronize();
+    clockStop = high_resolution_clock::now();
+    std::cout << "\nDFS:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
 
     cudaMemcpy(board, solution, N * N * sizeof(Uint), cudaMemcpyDeviceToHost);
-    printBoard(board, false);
 
     cudaFree(board1);
     cudaFree(board2);
@@ -240,6 +148,7 @@ Uint* solveSudoku(Uint *inBoard)
     cudaFree(empties);
     cudaFree(outStatus);
     cudaFree(solution);
+    
     return board;
 }
 
@@ -287,6 +196,7 @@ Uint* initializeBoard(Uint* inBoard)
 
     return board;
 }
+
 void initializeRows(Uint* board)
 {
     for (int r = 0; r < N; r++)
@@ -417,6 +327,117 @@ bool checkSolution(Uint* solution, Uint* board)
     }
 
     return isValid;
+}
+
+__global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* lastBoard, int* empties, int isFinal)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    while (idx < boardsCount)
+    {
+        int boardBegin = idx * BSIZE;
+        int i = boardBegin;
+        while (i < boardBegin + N * N)
+        {
+            if (oldBoard[i] == 0)
+                break;
+            i++;
+        }
+        if (i == boardBegin + N * N)
+            return;
+
+        int r = boardBegin + GET_ROW((i - boardBegin));
+        int c = boardBegin + GET_COLUMN((i - boardBegin));
+        int s = boardBegin + GET_SUBBOARD((i - boardBegin));
+        for (int number = 1; number <= N; number++)
+        {
+            if (CHECK_BIT(oldBoard[r], (number - 1)) && CHECK_BIT(oldBoard[c], (number - 1)) && CHECK_BIT(oldBoard[s], (number - 1)))
+            {
+                int curBoard = atomicAdd(lastBoard, 1);
+                int newBegin = curBoard * BSIZE;
+                int emptiesIdx = curBoard * N * N;
+                for (int j = 0; j < BSIZE; j++)
+                {
+                    newBoard[newBegin + j] = oldBoard[boardBegin + j];
+                    if (isFinal == 1 && j < N * N && oldBoard[boardBegin + j] == 0 && boardBegin + j != i)
+                    {
+                        empties[emptiesIdx] = j;
+                        emptiesIdx++;
+                    }
+                }
+                newBoard[newBegin + i - boardBegin] = number;
+                CLEAR_BIT(newBoard[newBegin + r - boardBegin], (number - 1));
+                CLEAR_BIT(newBoard[newBegin + c - boardBegin], (number - 1));
+                CLEAR_BIT(newBoard[newBegin + s - boardBegin], (number - 1));
+            }
+        }
+        idx += blockDim.x * gridDim.x;
+    }
+}
+
+__global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outStatus, Uint* solution)
+{
+    int idx = blockDim.x * blockIdx.x + threadIdx.x;
+
+    while ((*outStatus) == 0 && idx < boardsCount)
+    {
+        int boardBegin = idx * BSIZE;
+        int emptiesBegin = idx * N * N;
+        int emptiesIdx = emptiesBegin;
+
+        while (empties[emptiesIdx] >= 0)
+        {
+            int boardIdx = boardBegin + empties[emptiesIdx];
+            int r = boardBegin + GET_ROW((empties[emptiesIdx]));
+            int c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
+            int s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
+
+            board[boardIdx]++;
+            Uint number = board[boardIdx];
+            if (CHECK_BIT(board[r], (number - 1)) && CHECK_BIT(board[c], (number - 1)) && CHECK_BIT(board[s], (number - 1)))
+            {
+                CLEAR_BIT(board[r], (number - 1));
+                CLEAR_BIT(board[c], (number - 1));
+                CLEAR_BIT(board[s], (number - 1));
+                emptiesIdx++;
+            }
+            else
+            {
+                if (board[boardIdx] >= 9)
+                {
+                    board[boardIdx] = 0;
+                    emptiesIdx--;
+                    if (emptiesIdx < emptiesBegin)
+                        break;
+                    boardIdx = boardBegin + empties[emptiesIdx];
+                    r = boardBegin + GET_ROW((empties[emptiesIdx]));
+                    c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
+                    s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
+                    number = board[boardIdx];
+
+                    SET_BIT(board[r], (number - 1));
+                    SET_BIT(board[c], (number - 1));
+                    SET_BIT(board[s], (number - 1));
+
+                    if (r == 81)
+                    {
+                        board[boardBegin + BSIZE - 1] = emptiesIdx;
+                    }
+                }
+            }
+        }
+
+        if (empties[emptiesIdx] < 0 && emptiesIdx > emptiesBegin)
+        {
+            *outStatus = 1;
+            for (int i = 0; i < N * N; i++)
+            {
+                solution[i] = board[boardBegin + i];
+            }
+        }
+
+        idx += blockDim.x * gridDim.x;
+    }
 }
 
 //void printBoard(int* board, bool printAdditional)
