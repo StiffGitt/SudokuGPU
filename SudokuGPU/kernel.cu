@@ -8,17 +8,22 @@
 
 using namespace std::chrono;
 
+// Nazwa pliku z wejściowym sudoku
 #define BOARD_FILE "board.txt"
+#define BLOCKS 256
+#define THREADS 1024
+// Rozmiar pamięci na tablice - potęga 2
+#define MEMSIZE 26
+// Ilość wykonywanych iteracji BFS
+#define ITERATIONS 18
+// Stałe pomocnicze w reprezentacji sudoku
 #define N 9
 #define R 81
 #define C 90
 #define S 99
 #define BSIZE 108
-#define ITERATIONS 18
-#define BLOCKS 256
-#define THREADS 1024
-#define MEMSIZE 26
 typedef unsigned short Uint;
+// Makra do ustawiania masek bitowych dla wierszy, kolumn, kwadratów
 #define SET_BIT(a,b) a |= ((Uint)1 << b);
 #define CLEAR_BIT(a, b) a &= ~((Uint)1 << b);
 #define CHECK_BIT(a, b) (bool)((a >> b) & (Uint)1)
@@ -41,26 +46,29 @@ __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outSt
 
 int main()
 {
+    // Wczytanie tablicy
     char data[N * N];
     Uint* board = loadBoard(data);
     
     std::cout << "Input:";
-
     printBoard(board, false);
 
+    // Pomiar Prędkości rozwiązania CPU
     testCPU(data);
 
     auto clockStart = high_resolution_clock::now();
 
+    // Rozwiąznaie sudoku na GPU
     Uint* solution = solveSudoku(board);
 
     auto clockStop = high_resolution_clock::now();
     std::cout << "\nFull Time:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
 
-    std::cout << "\nSolution: ";
+    std::cout << "\nSolution:";
 
     printBoard(solution, false);
 
+    // Sprawdzenie poprawności rozwiązania
     if (checkSolution(solution, board))
         std::cout << "\nCORRECT SOLUTION!!";
     else
@@ -82,14 +90,32 @@ void testCPU(char *data)
 
 Uint* solveSudoku(Uint *inBoard)
 {
+    cudaError_t cudaStatus;
     std::chrono::steady_clock::time_point clockStart, clockStop;
-
     clockStart = high_resolution_clock::now();
+
+    // Dodanie dla sudoku flag reprezentujących,
+    // które liczby można wpisać w dany wiersz, kolumnę, kwadrat
     Uint* board = initializeBoard(inBoard);
 
+    // Maksymalny rozmiar tablicy
     const int boardMem = pow(2, MEMSIZE);
-    Uint* board1, *board2, *solution;
-    int* lastBoard, *empties, *emptiesCount, *outStatus;
+    
+    // Dwie tablice zawierające obecny stan sudoku
+    Uint *board1, *board2;
+    
+    // Tablica wyjściowa na rozwiązanie
+    Uint *solution;
+
+    // Indeks ostatniego sudoku w tablicy wejściowej BFS
+    int* lastBoard;
+
+    // Tablica przechowująca kolejne indeksy pustych pól dla danego sudoku
+    // jeśli skończyły się puste pola przyjmuje wartości -1
+    int *empties;
+
+    // Status rozwiązania DFS, równy 1 jeśli znaleziono rozwiązanie
+    int *outStatus;
 
     cudaMalloc(&board1, boardMem * sizeof(Uint));
     cudaMalloc(&board2, boardMem * sizeof(Uint));
@@ -104,13 +130,19 @@ Uint* solveSudoku(Uint *inBoard)
     cudaMemset(outStatus, 0, sizeof(int));
     cudaMemset(solution, 0, N * N * sizeof(Uint));
 
+    // Skopiowanie zainicjowanego sudoku na początek tablicy wejściowej BFS
     cudaMemcpy(board1, board, BSIZE * sizeof(Uint), cudaMemcpyHostToDevice);
+
+    // Liczba sudoku w tablicy wejściowej do BFS
     int boardsCount = 1;
+
+    // Flaga, oznaczająca czy dana iteracja BFS jest ostatnią (uzupełniana jest wtedy tablica empties)
     int isFinal = 0;
 
     clockStop = high_resolution_clock::now();
     std::cout << "\nMemory allocation:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n\n";
     clockStart = high_resolution_clock::now();
+
     for (int it = 0; it < ITERATIONS; it++)
     {
         cudaMemset(lastBoard, 0, sizeof(int));
@@ -123,10 +155,14 @@ Uint* solveSudoku(Uint *inBoard)
         else
             cudaDoBFS<<< BLOCKS, THREADS >>>(board2, board1, boardsCount, lastBoard, empties, isFinal);
 
+        if (cudaGetLastError() != cudaSuccess)
+            fprintf(stderr, "error launching BFS: %s\n", cudaGetErrorString(cudaStatus));
+
         cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
         
         printf("boards count after it %d: %d\n", it, boardsCount);
 
+        // Liczba sudoku w tablicy przekroczyła zadaną pamięć
         if (boardsCount > (boardMem / BSIZE))
         {
             std::cout << "\n memory overflow, bfs needs more memory, exiting... \n";
@@ -144,11 +180,17 @@ Uint* solveSudoku(Uint *inBoard)
 
     cudaDoDFS<<< BLOCKS, THREADS >>>(bfsBoard, boardsCount, empties, outStatus, solution);
 
+    if (cudaGetLastError() != cudaSuccess)
+        fprintf(stderr, "error launching DFS: %s\n", cudaGetErrorString(cudaStatus));
+
     cudaDeviceSynchronize();
     clockStop = high_resolution_clock::now();
     std::cout << "\nDFS:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
 
-    cudaMemcpy(board, solution, N * N * sizeof(Uint), cudaMemcpyDeviceToHost);
+    cudaStatus = cudaMemcpy(board, solution, N * N * sizeof(Uint), cudaMemcpyDeviceToHost);
+
+    if(cudaStatus != cudaSuccess)
+        fprintf(stderr, "error getting solution: %s\n", cudaGetErrorString(cudaStatus));
 
     cudaFree(board1);
     cudaFree(board2);
@@ -208,8 +250,14 @@ Uint* initializeBoard(Uint* inBoard)
 {
     Uint *board = (Uint*)malloc(BSIZE * sizeof(Uint));
     std::copy(inBoard, inBoard + N * N, board);
+
+    // Uzupełnij maski dla wierszy
     initializeRows(board);
+    
+    // Uzupełnij maski dla kolumn
     initializeColumns(board);
+    
+    // Uzupełnij maski dla kwadratów
     initializeSubboards(board);
 
     return board;
@@ -353,8 +401,11 @@ __global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* 
 
     while (idx < boardsCount)
     {
+        // Indeks rozpatrywanego sudoku w tablicy
         int boardBegin = idx * BSIZE;
         int i = boardBegin;
+
+        // Znalezienie pustego pola w sudoku
         while (i < boardBegin + N * N)
         {
             if (oldBoard[i] == 0)
@@ -364,26 +415,34 @@ __global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* 
         if (i == boardBegin + N * N)
             return;
 
+        // Indeksy wiersza, kolumny i kwadratu w którym znajduje się puste pole
         int r = boardBegin + GET_ROW((i - boardBegin));
         int c = boardBegin + GET_COLUMN((i - boardBegin));
         int s = boardBegin + GET_SUBBOARD((i - boardBegin));
         for (int number = 1; number <= N; number++)
         {
+            // Sprawdzenie, czy number można wpisać w wiersz, kolumnę i kwadrat
             if (CHECK_BIT(oldBoard[r], (number - 1)) && CHECK_BIT(oldBoard[c], (number - 1)) && CHECK_BIT(oldBoard[s], (number - 1)))
             {
+                // Pobranie indeksu pierwszego wolnego miejsca na sudoku w tablicy newBoard
                 int curBoard = atomicAdd(lastBoard, 1);
                 int newBegin = curBoard * BSIZE;
                 int emptiesIdx = curBoard * N * N;
+                // Kopiowanie sudoku do newBoard
                 for (int j = 0; j < BSIZE; j++)
                 {
                     newBoard[newBegin + j] = oldBoard[boardBegin + j];
+                    // Jeśli jesteśmy w ostatniej iteracji BFS wpisujemy wszystkie pozostałe puste pola do tablicy empties
                     if (isFinal == 1 && j < N * N && oldBoard[boardBegin + j] == 0 && boardBegin + j != i)
                     {
                         empties[emptiesIdx] = j;
                         emptiesIdx++;
                     }
                 }
+                // Uzupełnienie rozpatrywanego pola w skopiowanym sudoku
                 newBoard[newBegin + i - boardBegin] = number;
+
+                // Poprawienie masek bitowych dla wiersza, kolumny i kwadratu w skopiowanym sudoku
                 CLEAR_BIT(newBoard[newBegin + r - boardBegin], (number - 1));
                 CLEAR_BIT(newBoard[newBegin + c - boardBegin], (number - 1));
                 CLEAR_BIT(newBoard[newBegin + s - boardBegin], (number - 1));
@@ -399,34 +458,49 @@ __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outSt
 
     while ((*outStatus) == 0 && idx < boardsCount)
     {
+        // Indeks rozpatrywanego sudoku w tablicy
         int boardBegin = idx * BSIZE;
         int emptiesBegin = idx * N * N;
         int emptiesIdx = emptiesBegin;
 
+        // Dopoki istnieje puste pole w sudoku
         while (empties[emptiesIdx] >= 0)
         {
+            // Indeks pierwszego pustego pola na podstawie tablicy empties
             int boardIdx = boardBegin + empties[emptiesIdx];
+
+            // Indeksy wiersza, kolumny i kwadratu w którym znajduje się puste pole
             int r = boardBegin + GET_ROW((empties[emptiesIdx]));
             int c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
             int s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
 
             board[boardIdx]++;
             Uint number = board[boardIdx];
+            // Sprawdz czy dla rozpatrywanego numeru sudoku będzie poprawne
             if (CHECK_BIT(board[r], (number - 1)) && CHECK_BIT(board[c], (number - 1)) && CHECK_BIT(board[s], (number - 1)))
             {
+                // Popraw maski bitowe wiersza, kolumny i kwadratu dla wpisanego numeru
                 CLEAR_BIT(board[r], (number - 1));
                 CLEAR_BIT(board[c], (number - 1));
                 CLEAR_BIT(board[s], (number - 1));
+
+                // Idź do kolejnego pustego pola
                 emptiesIdx++;
             }
             else
             {
+                // Jeśli sprawdziliśmy już wszystkie możliwe liczby dla pola
                 if (board[boardIdx] >= 9)
                 {
+                    // Zerujemy obecne pole i cofamy się do poprzedniego pustego pola
                     board[boardIdx] = 0;
                     emptiesIdx--;
+                    // Jeśli to pierwsze puste pole, rozpatrywane sudoku nie ma rozwiązania
                     if (emptiesIdx < emptiesBegin)
                         break;
+
+                    // Dla pola, do którego się cofamy, modyfikujemy maski bitowe wiersza, kolumny i kwadratu,
+                    // tak aby odzwierciadlały stan sudoku gdy to pole jest puste
                     boardIdx = boardBegin + empties[emptiesIdx];
                     r = boardBegin + GET_ROW((empties[emptiesIdx]));
                     c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
@@ -436,15 +510,11 @@ __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outSt
                     SET_BIT(board[r], (number - 1));
                     SET_BIT(board[c], (number - 1));
                     SET_BIT(board[s], (number - 1));
-
-                    if (r == 81)
-                    {
-                        board[boardBegin + BSIZE - 1] = emptiesIdx;
-                    }
                 }
             }
         }
 
+        // Jeśli przeszliśmy przez wszystkie puste pola przepisujemy 
         if (empties[emptiesIdx] < 0 && emptiesIdx > emptiesBegin)
         {
             *outStatus = 1;
