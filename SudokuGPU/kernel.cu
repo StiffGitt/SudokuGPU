@@ -4,6 +4,7 @@
 #include <iostream>
 #include <chrono>
 #include <iomanip>
+#include "sudokuCPU.h"
 
 using namespace std::chrono;
 
@@ -15,9 +16,9 @@ using namespace std::chrono;
 #define BSIZE 108
 #define ITERATIONS 18
 #define BLOCKS 256
-#define THREADS 512
-#define MEMSIZE 28
-typedef unsigned int Uint;
+#define THREADS 1024
+#define MEMSIZE 26
+typedef unsigned short Uint;
 #define SET_BIT(a,b) a |= ((Uint)1 << b);
 #define CLEAR_BIT(a, b) a &= ~((Uint)1 << b);
 #define CHECK_BIT(a, b) (bool)((a >> b) & (Uint)1)
@@ -25,24 +26,29 @@ typedef unsigned int Uint;
 #define GET_COLUMN(i) (int)(C + i % N);
 #define GET_SUBBOARD(i) (int)(S + ((i / N) / 3) * 3 + ((i % N) / 3));
 
+void testCPU(char* data);
 Uint* solveSudoku(Uint* board);
+void printCPUBoard(char* solution);
 void printBoard(Uint* board, bool printAdditional);
 Uint* initializeBoard(Uint* board);
 void initializeRows(Uint* board);
 void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
-Uint* loadBoard();
+Uint* loadBoard(char* cBoard);
 bool checkSolution(Uint* solution, Uint* board);
 __global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* lastBoard, int* empties, int isFinal);
 __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outStatus, Uint* solution);
 
 int main()
 {
-    Uint* board = loadBoard();
-
+    char data[N * N];
+    Uint* board = loadBoard(data);
+    
     std::cout << "Input:";
 
     printBoard(board, false);
+
+    testCPU(data);
 
     auto clockStart = high_resolution_clock::now();
 
@@ -61,6 +67,17 @@ int main()
         std::cout << "\nINCORRECT SOLUTION!!";
 
     return 0;
+}
+
+void testCPU(char *data)
+{
+    char solution[81];
+    auto clockStart = high_resolution_clock::now();
+    int res = sudokuCPU(data, solution);
+    auto clockStop = high_resolution_clock::now();
+    std::cout << "\nCPU Solution:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
+    std::cout << "CPU res: " << res;
+    printCPUBoard(solution);
 }
 
 Uint* solveSudoku(Uint *inBoard)
@@ -90,7 +107,6 @@ Uint* solveSudoku(Uint *inBoard)
     cudaMemcpy(board1, board, BSIZE * sizeof(Uint), cudaMemcpyHostToDevice);
     int boardsCount = 1;
     int isFinal = 0;
-    int itDone = 0;
 
     clockStop = high_resolution_clock::now();
     std::cout << "\nMemory allocation:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n\n";
@@ -109,28 +125,20 @@ Uint* solveSudoku(Uint *inBoard)
 
         cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
         
-         printf("boards count after it %d: %d\n", it, boardsCount);
+        printf("boards count after it %d: %d\n", it, boardsCount);
 
-         if (boardsCount > (boardMem / BSIZE))
-         {
-             std::cout << "\n memory overflow, bfs needs more memory, exiting... \n";
-             return inBoard;
-         }
-         itDone = it + 1;
+        if (boardsCount > (boardMem / BSIZE))
+        {
+            std::cout << "\n memory overflow, bfs needs more memory, exiting... \n";
+            return inBoard;
+        }
+        cudaDeviceSynchronize();
     }
 
-    Uint* bfsBoard = (itDone % 2 == 0)? board1 : board2;
+    Uint* bfsBoard = (ITERATIONS % 2 == 0)? board1 : board2;
 
-    cudaDeviceSynchronize();
     clockStop = high_resolution_clock::now();
     std::cout << "\nBFS:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
-
-    /*cudaMemcpy(board, bfsBoard, BSIZE * sizeof(Uint), cudaMemcpyDeviceToHost);
-    printBoard(board, true);*/
-
-    /*int tab[N * N];
-    cudaMemcpy(tab, empties, N * N * sizeof(int), cudaMemcpyDeviceToHost);
-    printBoard(tab, false);*/
 
     clockStart = high_resolution_clock::now();
 
@@ -148,8 +156,18 @@ Uint* solveSudoku(Uint *inBoard)
     cudaFree(empties);
     cudaFree(outStatus);
     cudaFree(solution);
-    
+
     return board;
+}
+
+void printCPUBoard(char* solution)
+{
+    Uint uSol[N * N];
+    for (int i = 0; i < N * N; i++)
+    {
+        uSol[i] = (Uint)(solution[i] - '0');
+    }
+    printBoard(uSol, false);
 }
 
 void printBoard(Uint* board, bool printAdditional)
@@ -239,7 +257,7 @@ void initializeSubboards(Uint* board)
     }
 }
 
-Uint* loadBoard()
+Uint* loadBoard(char *cBoard)
 {
     FILE* boardFile = fopen(BOARD_FILE, "r");
     Uint* board = (Uint*)malloc(N * N * sizeof(Uint));
@@ -260,7 +278,7 @@ Uint* loadBoard()
                 printf("boardFile error\n");
                 return board;
             }
-
+            cBoard[i * N + j] = c;
             if (c >= '1' && c <= '9') {
                 board[i * N + j] = (Uint)(c - '0');
             }
@@ -439,37 +457,3 @@ __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outSt
         idx += blockDim.x * gridDim.x;
     }
 }
-
-//void printBoard(int* board, bool printAdditional)
-//{
-//    std::cout << "\n\n";
-//    for (int i = 0; i < N; i++)
-//    {
-//        if (i == 3 || i == 6)
-//            std::cout << "-------------------\n";
-//        for (int j = 0; j < N; j++)
-//        {
-//            if (j == 3 || j == 6)
-//                std::cout << "|";
-//            std::cout << board[i * N + j] << " ";
-//        }
-//        std::cout << "\n";
-//    }
-//    if (!printAdditional)
-//        return;
-//    std::cout << "\n" << "rows: " << "\n";
-//    for (int i = 0; i < N; i++)
-//    {
-//        std::cout << board[R + i] << " ";
-//    }
-//    std::cout << "\n" << "columns: " << "\n";
-//    for (int i = 0; i < N; i++)
-//    {
-//        std::cout << board[C + i] << " ";
-//    }
-//    std::cout << "\n" << "subboards: " << "\n";
-//    for (int i = 0; i < N; i++)
-//    {
-//        std::cout << board[S + i] << " ";
-//    }
-//}
