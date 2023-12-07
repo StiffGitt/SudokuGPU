@@ -4,18 +4,19 @@
 #include <iostream>
 #include <chrono>
 #include <iomanip>
+#include <string>
 #include "sudokuCPU.h"
 
 using namespace std::chrono;
 
 // Nazwa pliku z wejściowym sudoku
-#define BOARD_FILE "empty board.txt"
+#define BOARD_FILE "emptyBoard.txt"
 #define BLOCKS 256
 #define THREADS 1024
 // Rozmiar pamięci na tablice - potęga 2
 #define MEMSIZE 28
 // Ilość wykonywanych iteracji BFS
-#define ITERATIONS 17
+#define ITERATIONS 18
 // Stałe pomocnicze w reprezentacji sudoku
 #define N 9
 #define R 81
@@ -32,23 +33,29 @@ typedef unsigned short Uint;
 #define GET_SUBBOARD(i) (int)(S + ((i / N) / 3) * 3 + ((i % N) / 3));
 
 void testCPU(char* data);
-Uint* solveSudoku(Uint* board);
+Uint* solveSudoku(Uint* board, int iterations);
 void printCPUBoard(char* solution);
 void printBoard(Uint* board, bool printAdditional);
 Uint* initializeBoard(Uint* board);
 void initializeRows(Uint* board);
 void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
-Uint* loadBoard(char* cBoard);
+Uint* loadBoard(std::string fileName, char* cBoard);
 bool checkSolution(Uint* solution, Uint* board);
 __global__ void cudaDoBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int* lastBoard, int* empties, int isFinal);
 __global__ void cudaDoDFS(Uint* board, int boardsCount, int* empties, int* outStatus, Uint* solution);
 
-int main()
+int main(int argc, char* argv[])
 {
+    std::string fileName = BOARD_FILE;
+    int iterations = ITERATIONS;
+    if (argc > 1)
+        fileName = argv[1];
+    if (argc > 2)
+        iterations = std::stoi(argv[2]);
     // Wczytanie tablicy
     char data[N * N];
-    Uint* board = loadBoard(data);
+    Uint* board = loadBoard(fileName, data);
     
     std::cout << "Input:";
     printBoard(board, false);
@@ -59,7 +66,7 @@ int main()
     auto clockStart = high_resolution_clock::now();
 
     // Rozwiąznaie sudoku na GPU
-    Uint* solution = solveSudoku(board);
+    Uint* solution = solveSudoku(board, iterations);
 
     auto clockStop = high_resolution_clock::now();
     std::cout << "\nFull Time:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
@@ -74,6 +81,7 @@ int main()
     else
         std::cout << "\nINCORRECT SOLUTION!!";
 
+    std::getchar();
     return 0;
 }
 
@@ -88,7 +96,7 @@ void testCPU(char *data)
     printCPUBoard(solution);
 }
 
-Uint* solveSudoku(Uint *inBoard)
+Uint* solveSudoku(Uint *inBoard, int iterations)
 {
     cudaError_t cudaStatus;
     std::chrono::steady_clock::time_point clockStart, clockStop;
@@ -143,11 +151,11 @@ Uint* solveSudoku(Uint *inBoard)
     std::cout << "\nMemory allocation:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n\n";
     clockStart = high_resolution_clock::now();
 
-    for (int it = 0; it < ITERATIONS; it++)
+    for (int it = 0; it < iterations; it++)
     {
         cudaMemset(lastBoard, 0, sizeof(int));
         
-        if (it == ITERATIONS - 1)
+        if (it == iterations - 1)
             isFinal = 1;
 
         if(it % 2 == 0)
@@ -155,7 +163,8 @@ Uint* solveSudoku(Uint *inBoard)
         else
             cudaDoBFS<<< BLOCKS, THREADS >>>(board2, board1, boardsCount, lastBoard, empties, isFinal);
 
-        if (cudaGetLastError() != cudaSuccess)
+        cudaStatus = cudaGetLastError();
+        if (cudaStatus != cudaSuccess)
             fprintf(stderr, "error launching BFS: %s\n", cudaGetErrorString(cudaStatus));
 
         cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
@@ -171,7 +180,7 @@ Uint* solveSudoku(Uint *inBoard)
         cudaDeviceSynchronize();
     }
 
-    Uint* bfsBoard = (ITERATIONS % 2 == 0)? board1 : board2;
+    Uint* bfsBoard = (iterations % 2 == 0)? board1 : board2;
 
     clockStop = high_resolution_clock::now();
     std::cout << "\nBFS:    " << std::setw(7) << 0.001 * duration_cast<microseconds>(clockStop - clockStart).count() << " milisec\n";
@@ -180,7 +189,8 @@ Uint* solveSudoku(Uint *inBoard)
 
     cudaDoDFS<<< BLOCKS, THREADS >>>(bfsBoard, boardsCount, empties, outStatus, solution);
 
-    if (cudaGetLastError() != cudaSuccess)
+    cudaStatus = cudaGetLastError();
+    if (cudaStatus != cudaSuccess)
         fprintf(stderr, "error launching DFS: %s\n", cudaGetErrorString(cudaStatus));
 
     cudaDeviceSynchronize();
@@ -305,11 +315,18 @@ void initializeSubboards(Uint* board)
     }
 }
 
-Uint* loadBoard(char *cBoard)
+Uint* loadBoard(std::string fileName, char *cBoard)
 {
-    FILE* boardFile = fopen(BOARD_FILE, "r");
+    FILE* boardFile = fopen(fileName.c_str(), "r");
+
     Uint* board = (Uint*)malloc(N * N * sizeof(Uint));
     char c;
+
+    if (!boardFile)
+    {
+        std::cout << "File: " << fileName << " does not exist!";
+        return board;
+    }
 
     if (boardFile == NULL)
     {
