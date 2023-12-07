@@ -9,9 +9,10 @@
 #define C 90
 #define S 99
 #define BSIZE 108
-#define ITERATIONS 20
+#define ITERATIONS 18
 #define BLOCKS 256
 #define THREADS 512
+#define MEMSIZE 28
 typedef unsigned int Uint;
 #define SET_BIT(a,b) a |= ((Uint)1 << b);
 #define CLEAR_BIT(a, b) a &= ~((Uint)1 << b);
@@ -27,6 +28,7 @@ void initializeRows(Uint* board);
 void initializeColumns(Uint* board);
 void initializeSubboards(Uint* board);
 Uint* loadBoard();
+bool checkSolution(Uint* solution, Uint* board);
 
 __global__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *lastBoard, int* empties, int isFinal)
 {
@@ -58,7 +60,7 @@ __global__ void cudaBFS(Uint* oldBoard, Uint* newBoard, int boardsCount, int *la
                 for (int j = 0; j < BSIZE; j++)
                 {
                     newBoard[newBegin + j] = oldBoard[boardBegin + j];
-                    if (isFinal == 1 && oldBoard[boardBegin + j] == 0 && boardBegin + j != newBegin + i - boardBegin)
+                    if (isFinal == 1 && j < N * N && oldBoard[boardBegin + j] == 0 && boardBegin + j != i)
                     {
                         empties[emptiesIdx] = j;
                         emptiesIdx++;
@@ -84,12 +86,12 @@ __global__ void cudaDFS(Uint* board, int boardsCount, int* empties, int* outStat
         int emptiesBegin = idx * N * N;
         int emptiesIdx = emptiesBegin;
 
-        while (emptiesIdx >= emptiesBegin && empties[emptiesIdx] >= 0)
+        while (empties[emptiesIdx] >= 0)
         {
             int boardIdx = boardBegin + empties[emptiesIdx];
-            int r = boardBegin + GET_ROW((boardIdx - boardBegin));
-            int c = boardBegin + GET_COLUMN((boardIdx - boardBegin));
-            int s = boardBegin + GET_SUBBOARD((boardIdx - boardBegin));
+            int r = boardBegin + GET_ROW((empties[emptiesIdx]));
+            int c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
+            int s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
 
             board[boardIdx]++;
             Uint number = board[boardIdx];
@@ -104,22 +106,29 @@ __global__ void cudaDFS(Uint* board, int boardsCount, int* empties, int* outStat
             {
                 if (board[boardIdx] >= 9)
                 {
-                    board[emptiesIdx] = 0;
+                    board[boardIdx] = 0;
                     emptiesIdx--;
+                    if (emptiesIdx < emptiesBegin)
+                        break;
                     boardIdx = boardBegin + empties[emptiesIdx];
-                    r = boardBegin + GET_ROW((boardIdx - boardBegin));
-                    c = boardBegin + GET_COLUMN((boardIdx - boardBegin));
-                    s = boardBegin + GET_SUBBOARD((boardIdx - boardBegin));
+                    r = boardBegin + GET_ROW((empties[emptiesIdx]));
+                    c = boardBegin + GET_COLUMN((empties[emptiesIdx]));
+                    s = boardBegin + GET_SUBBOARD((empties[emptiesIdx]));
                     number = board[boardIdx];
 
                     SET_BIT(board[r], (number - 1));
                     SET_BIT(board[c], (number - 1));
                     SET_BIT(board[s], (number - 1));
+
+                    if (r == 81)
+                    {
+                        board[boardBegin + BSIZE - 1] = emptiesIdx;
+                    }
                 }
             }
         }
 
-        if (emptiesIdx < 0)
+        if (empties[emptiesIdx] < 0 && emptiesIdx > emptiesBegin)
         {
             *outStatus = 1;
             for (int i = 0; i < N * N; i++)
@@ -145,7 +154,11 @@ int main()
         5, 7, 0, 1, 0, 0, 2, 0, 0,
         9, 2, 8, 0, 0, 0, 0, 6, 0 };*/
     Uint* board = loadBoard();
-    solveSudoku(board);
+    Uint* solution = solveSudoku(board);
+    if (checkSolution(solution, board))
+        std::cout << "\n\CORRECT SOLUTION!!";
+    else
+        std::cout << "\n\INCORRECT SOLUTION!!";
     return 0;
 }
 
@@ -154,7 +167,7 @@ Uint* solveSudoku(Uint *inBoard)
     Uint* board = initializeBoard(inBoard);
     printBoard(board, true);
 
-    const int boardMem = pow(2, 26);
+    const int boardMem = pow(2, MEMSIZE);
     Uint* board1, *board2;
     int* lastBoard, *empties, *emptiesCount;
 
@@ -172,6 +185,7 @@ Uint* solveSudoku(Uint *inBoard)
     cudaMemcpy(board1, board, BSIZE * sizeof(Uint), cudaMemcpyHostToDevice);
     int boardsCount = 1;
     int isFinal = 0;
+    int itDone = 0;
     
     for (int it = 0; it < ITERATIONS; it++)
     {
@@ -188,12 +202,23 @@ Uint* solveSudoku(Uint *inBoard)
         cudaMemcpy(&boardsCount, lastBoard, sizeof(int), cudaMemcpyDeviceToHost);
         
          printf("boards count after it %d: %d\n", it, boardsCount);
+
+         if (boardsCount > (boardMem / BSIZE))
+         {
+             std::cout << "\n memory overflow, bfs needs more memory, bfs rollback... \n";
+             break;
+         }
+         itDone = it + 1;
     }
 
-    Uint* bfsBoard = (ITERATIONS % 2 == 0)? board1 : board2;
+    Uint* bfsBoard = (itDone % 2 == 0)? board1 : board2;
 
     cudaMemcpy(board, bfsBoard, BSIZE * sizeof(Uint), cudaMemcpyDeviceToHost);
     printBoard(board, true);
+
+    /*int tab[N * N];
+    cudaMemcpy(tab, empties, N * N * sizeof(int), cudaMemcpyDeviceToHost);
+    printBoard(tab, false);*/
 
     int *outStatus;
     Uint* solution;
@@ -336,3 +361,94 @@ Uint* loadBoard()
     }
     return board;
 }
+
+void clearChecked(bool* checked)
+{
+    for (int i = 0; i < N; i++)
+    {
+        checked[i] = false;
+    }
+}
+
+bool checkSolution(Uint* solution, Uint* board)
+{
+    bool isValid = true;
+    for (int i = 0; i < N * N; i++)
+    {
+        if (board[i] > 0 && solution[i] != board[i])
+            isValid = false;
+        if (solution[i] == 0)
+            return false;
+    }
+    bool checked[N];
+    for (int r = 0; r < N; r++)
+    {
+        clearChecked(checked);
+        for (int i = 0; i < N; i++)
+        {
+            if (checked[solution[r * N + i] - 1] == true)
+                isValid = false;
+            checked[solution[r * N + i] - 1] = true;
+        }
+    }
+    for (int c = 0; c < N; c++)
+    {
+        clearChecked(checked);
+        for (int i = 0; i < N; i++)
+        {
+            if (checked[solution[i * N + c] - 1] == true)
+                isValid = false;
+            checked[solution[i * N + c] - 1] = true;
+        }
+    }
+
+    for (int s = 0; s < N; s++)
+    {
+        clearChecked(checked);
+        int start = ((s / 3) * 3) * N + ((s % 3) * 3);
+        for (int i = 0; i < N; i++)
+        {
+            int r = i / 3;
+            int c = i % 3;
+            if (checked[solution[start + r * N + c] - 1] == true)
+                isValid = false;
+            checked[solution[start + r * N + c] - 1] = true;
+        }
+    }
+
+    return isValid;
+}
+
+//void printBoard(int* board, bool printAdditional)
+//{
+//    std::cout << "\n\n";
+//    for (int i = 0; i < N; i++)
+//    {
+//        if (i == 3 || i == 6)
+//            std::cout << "-------------------\n";
+//        for (int j = 0; j < N; j++)
+//        {
+//            if (j == 3 || j == 6)
+//                std::cout << "|";
+//            std::cout << board[i * N + j] << " ";
+//        }
+//        std::cout << "\n";
+//    }
+//    if (!printAdditional)
+//        return;
+//    std::cout << "\n" << "rows: " << "\n";
+//    for (int i = 0; i < N; i++)
+//    {
+//        std::cout << board[R + i] << " ";
+//    }
+//    std::cout << "\n" << "columns: " << "\n";
+//    for (int i = 0; i < N; i++)
+//    {
+//        std::cout << board[C + i] << " ";
+//    }
+//    std::cout << "\n" << "subboards: " << "\n";
+//    for (int i = 0; i < N; i++)
+//    {
+//        std::cout << board[S + i] << " ";
+//    }
+//}
