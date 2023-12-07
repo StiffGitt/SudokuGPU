@@ -9,13 +9,13 @@
 using namespace std::chrono;
 
 // Nazwa pliku z wejściowym sudoku
-#define BOARD_FILE "board.txt"
+#define BOARD_FILE "empty board.txt"
 #define BLOCKS 256
 #define THREADS 1024
 // Rozmiar pamięci na tablice - potęga 2
-#define MEMSIZE 26
+#define MEMSIZE 28
 // Ilość wykonywanych iteracji BFS
-#define ITERATIONS 18
+#define ITERATIONS 17
 // Stałe pomocnicze w reprezentacji sudoku
 #define N 9
 #define R 81
